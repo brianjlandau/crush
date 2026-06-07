@@ -622,6 +622,64 @@ func TestRunSubAgent_RegistersAndUnregistersRuntime(t *testing.T) {
 	require.Empty(t, after, "Runtime must have no entries after runSubAgent returns")
 }
 
+// TestRunSubAgent_CancelledRollsUpParentCost verifies that a context.Canceled
+// from the agent run still rolls up whatever cost the sub-agent accrued
+// before cancellation into the parent session, the same roll-up the success
+// path performs via updateParentSessionCost. The cancelled branch currently
+// returns before that call runs, so a cancelled sub-agent”'s spend never
+// reaches the parent session”'s total.
+func TestRunSubAgent_CancelledRollsUpParentCost(t *testing.T) {
+	t.Parallel()
+
+	const providerID = "test-provider"
+	providerCfg := config.ProviderConfig{ID: providerID}
+
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Providers.Set(providerID, providerCfg)
+
+	rt := subagents.NewRuntime()
+	t.Cleanup(rt.Shutdown)
+
+	parentSession, err := env.sessions.Create(t.Context(), "Parent")
+	require.NoError(t, err)
+
+	agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+		// Simulate the sub-agent incurring cost before it gets cancelled.
+		childSession, err := env.sessions.Get(ctx, call.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		childSession.Cost = 0.05
+		if _, err := env.sessions.Save(ctx, childSession); err != nil {
+			return nil, err
+		}
+		return nil, context.Canceled
+	})
+
+	coord := &coordinator{cfg: cfg, sessions: env.sessions, runtime: rt}
+
+	resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		Agent:          agent,
+		SessionID:      parentSession.ID,
+		AgentMessageID: "msg-1",
+		ToolCallID:     "call-1",
+		Prompt:         "do something",
+		SessionTitle:   "Cancel Test",
+		AgentName:      "a",
+		AgentColor:     "red",
+	})
+	require.NoError(t, err)
+	require.True(t, resp.IsError)
+	require.Equal(t, "Subagent cancelled by user", resp.Content)
+
+	updated, err := env.sessions.Get(t.Context(), parentSession.ID)
+	require.NoError(t, err)
+	assert.InDelta(t, 0.05, updated.Cost, 1e-9,
+		"a cancelled sub-agent'''s accrued cost must still roll up into the parent session")
+}
+
 func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 	// Bedrock is Fantasy's Anthropic under a different provider name; options
 	// must land under anthropic.Name so the Anthropic language model picks them up.
