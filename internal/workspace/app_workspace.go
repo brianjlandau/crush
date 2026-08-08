@@ -513,8 +513,10 @@ func subagentScope(filePath, workingDir string) string {
 	if filePath == "" {
 		return "builtin"
 	}
-	if subagents.InGlobalDir(filePath) {
-		return "user"
+	for _, dir := range config.GlobalSubagentsDirs() {
+		if fsext.HasPrefix(filePath, dir) {
+			return "user"
+		}
 	}
 	if workingDir != "" && fsext.HasPrefix(filePath, workingDir) {
 		return "project"
@@ -605,34 +607,14 @@ func (w *AppWorkspace) SetSubagentDisabled(name string, disabled bool) error {
 }
 
 // reloadSubagents re-runs discovery from the current config and swaps the
-// Manager's snapshot, publishing a discovery event. Model ids are validated
-// against the config (matching startup) so an invalid model stays rejected,
-// and the store's resolver is wired through so $VAR-style path entries
-// expand the same way they do at startup.
+// Manager's snapshot, publishing a discovery event. The shared
+// DiscoveryConfigFromStore adapter keeps reload inputs (paths, resolver,
+// model and skill validation) identical to startup discovery in cmd/root.go
+// and backend.go.
 func (w *AppWorkspace) reloadSubagents() {
-	cfg := w.store.Config()
-	var subagentsPaths []string
-	var disabledSubagents []string
-	if cfg.Options != nil {
-		subagentsPaths = cfg.Options.SubagentsPaths
-		disabledSubagents = config.EffectiveDisabledSubagents(cfg.Options)
-	}
-	var resolver func(string) (string, error)
-	if r := w.store.Resolver(); r != nil {
-		resolver = r.ResolveValue
-	}
-	all, active, states := subagents.DiscoverFromConfig(subagents.DiscoveryConfig{
-		SubagentsPaths:    subagentsPaths,
-		DisabledSubagents: disabledSubagents,
-
-		// Resolver expands $VAR-style path entries, matching startup
-		// discovery (cmd/root.go, backend.go).
-		Resolver: resolver,
-
-		// Match startup discovery (cmd/root.go, backend.go): validate model
-		// ids so a subagent with an invalid model stays rejected after reload.
-		IsKnownModel: cfg.IsKnownModel,
-	})
+	all, active, states := subagents.DiscoverFromConfig(
+		subagents.DiscoveryConfigFromStore(w.store, w.app.Skills),
+	)
 	w.app.Subagents.Reload(all, active, states)
 }
 
