@@ -619,6 +619,25 @@ func (c *Config) setDefaults(workingDir, dataDir string) {
 	// Project specific skills dirs.
 	c.Options.SkillsPaths = append(c.Options.SkillsPaths, ProjectSkillsDir(workingDir)...)
 
+	// Add the default global and project subagents directories, deduped
+	// against any user-configured paths and against each other, then
+	// prepend them so user-configured paths stay last. subagents.DiscoverWithStates
+	// documents that later paths win on a name collision, so built-in
+	// defaults must come first and explicit user config must win.
+	// Guarded like the skills paths above: setDefaults runs twice per
+	// config reload (ConfigStore.reloadFromDiskLocked calls it once on the
+	// freshly-loaded config and again after merging workspace-scope
+	// overrides), so an unconditional prepend would duplicate these
+	// entries on every reload and grow SubagentsPaths unbounded over a
+	// session.
+	var defaultSubagentsDirs []string
+	for _, dir := range append(slices.Clone(GlobalSubagentsDirs()), ProjectSubagentsDir(workingDir)...) {
+		if !slices.Contains(c.Options.SubagentsPaths, dir) && !slices.Contains(defaultSubagentsDirs, dir) {
+			defaultSubagentsDirs = append(defaultSubagentsDirs, dir)
+		}
+	}
+	c.Options.SubagentsPaths = append(defaultSubagentsDirs, c.Options.SubagentsPaths...)
+
 	if str, ok := os.LookupEnv("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE"); ok {
 		c.Options.DisableProviderAutoUpdate, _ = strconv.ParseBool(str)
 	}
@@ -1406,6 +1425,35 @@ func ProjectSkillsDir(workingDir string) []string {
 	}
 
 	return dirs
+}
+
+// GlobalSubagentsDirs returns the default global directories for subagent definitions.
+func GlobalSubagentsDirs() []string {
+	paths := []string{
+		filepath.Join(home.Config(), appName, "subagents"),
+		filepath.Join(home.Config(), "agents", "subagents"),
+		filepath.Join(home.Dir(), ".agents", "subagents"),
+	}
+	if runtime.GOOS == "windows" {
+		appData := cmp.Or(
+			os.Getenv("LOCALAPPDATA"),
+			filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local"),
+		)
+		paths = append(
+			paths,
+			filepath.Join(appData, appName, "subagents"),
+			filepath.Join(appData, "agents", "subagents"),
+		)
+	}
+	return paths
+}
+
+// ProjectSubagentsDir returns the default project directories for subagent definitions.
+func ProjectSubagentsDir(workingDir string) []string {
+	return []string{
+		filepath.Join(workingDir, ".agents", "subagents"),
+		filepath.Join(workingDir, ".crush", "subagents"),
+	}
 }
 
 func isAppleTerminal() bool { return os.Getenv("TERM_PROGRAM") == "Apple_Terminal" }
