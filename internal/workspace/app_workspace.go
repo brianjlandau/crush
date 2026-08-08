@@ -21,7 +21,6 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
-	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -452,17 +451,6 @@ func (w *AppWorkspace) RunningSubagents(parentSessionID string) []RunningSubagen
 	return result
 }
 
-// SubscribeSubagentRuntime returns a channel of RuntimeEvents from the
-// SubagentRuntime. Returns a closed channel when SubagentRuntime is nil.
-func (w *AppWorkspace) SubscribeSubagentRuntime(ctx context.Context) <-chan pubsub.Event[subagents.RuntimeEvent] {
-	if w.app.SubagentRuntime == nil {
-		ch := make(chan pubsub.Event[subagents.RuntimeEvent])
-		close(ch)
-		return ch
-	}
-	return w.app.SubagentRuntime.Subscribe(ctx)
-}
-
 // CancelSubagent cancels the subagent session with the given childSessionID.
 // It is a no-op when AgentCoordinator is nil.
 func (w *AppWorkspace) CancelSubagent(childSessionID string) {
@@ -514,10 +502,8 @@ func subagentScope(filePath, workingDir string, projectDirs []string) string {
 	if filePath == "" {
 		return "builtin"
 	}
-	for _, dir := range config.GlobalSubagentsDirs() {
-		if fsext.HasPrefix(filePath, dir) {
-			return "user"
-		}
+	if subagents.InGlobalDir(filePath) {
+		return "user"
 	}
 	if workingDir != "" && fsext.HasPrefix(filePath, workingDir) {
 		return "project"
@@ -573,11 +559,11 @@ func (w *AppWorkspace) DeleteUserSubagent(name string) error {
 // a broader one, since jsons.Merge concatenates arrays across scopes rather
 // than overriding them.
 func (w *AppWorkspace) SetSubagentDisabled(name string, disabled bool) error {
-	var currentDisabled, currentEnabled []string
-	if cfg := w.store.Config(); cfg.Options != nil {
-		currentDisabled = cfg.Options.DisabledSubagents
-		currentEnabled = cfg.Options.EnabledSubagents
-	}
+	// Read from the same scope this writes to. w.store.Config() is the merged
+	// view, so using it here would copy entries the user disabled globally into
+	// the workspace file, pinning them at workspace scope forever.
+	currentDisabled := w.store.StringSliceConfigField(config.ScopeWorkspace, "options.disabled_subagents")
+	currentEnabled := w.store.StringSliceConfigField(config.ScopeWorkspace, "options.enabled_subagents")
 	// enabled_subagents cancels out a disable set at a broader scope (see
 	// config.EffectiveDisabledSubagents); jsons.Merge concatenates arrays
 	// across scopes rather than overriding them, so subtracting from
@@ -619,16 +605,6 @@ func addOrRemove(list []string, name string, add bool) []string {
 		next = append(next, name)
 	}
 	return next
-}
-
-// SessionTokens returns the prompt and completion token counts for the given
-// session. It delegates to the session service and propagates any error.
-func (w *AppWorkspace) SessionTokens(ctx context.Context, sessionID string) (prompt, completion int64, err error) {
-	sess, err := w.app.Sessions.Get(ctx, sessionID)
-	if err != nil {
-		return 0, 0, err
-	}
-	return sess.PromptTokens, sess.CompletionTokens, nil
 }
 
 // -- MCP operations --
