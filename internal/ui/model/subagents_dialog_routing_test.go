@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/subagents"
 	"github.com/charmbracelet/crush/internal/ui/dialog"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/stretchr/testify/require"
@@ -53,6 +55,37 @@ func TestHandleSubagentsDialogMsg_RoutesByIDNotFront(t *testing.T) {
 
 	require.Len(t, subagentsDialog.msgs, 1, "the buried subagents dialog must still receive its data")
 	require.IsType(t, dialog.SubagentsInitialDataMsg{}, subagentsDialog.msgs[0])
+}
+
+// TestUpdate_RuntimeEventReachesBuriedSubagentsDialog verifies that a
+// subagents.RuntimeEvent arriving through the real Update entry point still
+// reaches the subagents dialog even when another dialog (e.g. a permission
+// prompt opened during the very run the user is watching) is in front of it.
+// Update's RuntimeEvent case must route by ID via handleSubagentsDialogMsg,
+// not merely hand the message to whichever dialog is on top.
+func TestUpdate_RuntimeEventReachesBuriedSubagentsDialog(t *testing.T) {
+	t.Parallel()
+
+	u := newTestUI()
+	u.dialog = dialog.NewOverlay()
+
+	subagentsDialog := &recordingDialog{id: dialog.SubagentsID}
+	u.dialog.OpenDialog(subagentsDialog)
+	permissionsDialog := &recordingDialog{id: dialog.PermissionsID}
+	u.dialog.OpenDialogWithGrace(permissionsDialog)
+
+	require.Equal(t, dialog.PermissionsID, u.dialog.DialogLast().ID(),
+		"the permission prompt must be in front for this test to mean anything")
+
+	msg := pubsub.Event[subagents.RuntimeEvent]{
+		Type:    pubsub.UpdatedEvent,
+		Payload: subagents.RuntimeEvent{},
+	}
+
+	_, _ = u.Update(msg)
+
+	require.Len(t, subagentsDialog.msgs, 1, "the buried subagents dialog must still receive the runtime event")
+	require.Empty(t, permissionsDialog.msgs, "the front dialog should not be the one receiving this event")
 }
 
 // TestHandleSubagentsDialogMsg_NoDialogOpen verifies that a result arriving
